@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CSV Forecaster</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-50 p-6 text-gray-800">
+  <div class="max-w-5xl mx-auto">
+    <h1 class="text-2xl font-bold mb-4">CSV Forecasting Tool</h1>
+
+    <input type="file" id="csvFile" accept=".csv" class="mb-4" />
+
+    <div class="flex gap-4 mb-4">
+      <select id="accountSelect" class="border p-2 rounded w-1/4"></select>
+      <input type="number" id="horizon" placeholder="Forecast horizon (N)" class="border p-2 rounded w-1/4" />
+      <select id="method" class="border p-2 rounded w-1/2">
+        <option value="holt">Holt-Winters Seasonal</option>
+        <option value="ses">Simple Exponential Smoothing</option>
+        <option value="ma">Moving Average (3)</option>
+        <option value="lr">Linear Regression</option>
+      </select>
+    </div>
+
+    <button onclick="generateForecast()" class="bg-blue-600 text-white px-4 py-2 rounded mb-4">Generate</button>
+    <button onclick="downloadCSV()" class="bg-green-600 text-white px-4 py-2 rounded mb-4 ml-2">Download CSV</button>
+
+    <div class="overflow-x-auto max-h-[300px] mb-6">
+      <table id="dataTable" class="table-auto border-collapse border w-full text-sm"></table>
+    </div>
+
+    <canvas id="chartCanvas" height="100"></canvas>
+  </div>
+
+  <script>
+    let rawData = [];
+    let headers = [];
+    let chart;
+
+    document.getElementById('csvFile').addEventListener('change', (e) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const lines = event.target.result.split('\n').filter(line => line.trim());
+        headers = lines[0].split(',').map(h => h.trim());
+        rawData = lines.slice(1).map(row => row.split(',').map(cell => cell.trim()));
+        populateAccountSelect();
+        drawTable();
+        drawChart();
+      };
+      reader.readAsText(e.target.files[0]);
+    });
+
+    function populateAccountSelect() {
+      const select = document.getElementById('accountSelect');
+      select.innerHTML = '';
+      rawData.forEach(row => {
+        const option = document.createElement('option');
+        option.value = row[0];
+        option.textContent = row[0];
+        select.appendChild(option);
+      });
+    }
+
+    function drawTable() {
+      const table = document.getElementById('dataTable');
+      table.innerHTML = '';
+
+      const thead = document.createElement('thead');
+      thead.innerHTML = `<tr>${headers.map(h => `<th class="border px-2">${h}</th>`).join('')}</tr>`;
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      rawData.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = row.map(cell => `<td class="border px-2">${Math.round(parseFloat(cell) || 0)}</td>`).join('');
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+    }
+
+    function drawChart() {
+      const account = document.getElementById('accountSelect').value;
+      const index = rawData.findIndex(row => row[0] === account);
+      if (index === -1) return;
+
+      const actual = rawData[index].slice(1).map(v => parseFloat(v) || 0);
+      const labels = headers.slice(1);
+
+      if (chart) chart.destroy();
+      const ctx = document.getElementById('chartCanvas').getContext('2d');
+
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Actual',
+            data: actual,
+            borderColor: 'blue',
+            fill: false,
+            borderWidth: 2
+          }]
+        }
+      });
+    }
+
+    function generateForecast() {
+      const account = document.getElementById('accountSelect').value;
+      const method = document.getElementById('method').value;
+      const N = parseInt(document.getElementById('horizon').value);
+      const index = rawData.findIndex(row => row[0] === account);
+      if (index === -1 || isNaN(N)) return;
+
+      const original = rawData[index].slice(1).map(v => parseFloat(v) || 0);
+      let forecast = [];
+
+      switch (method) {
+        case 'ses': {
+          const alpha = 0.5;
+          let last = original[0];
+          original.forEach(v => last = alpha * v + (1 - alpha) * last);
+          forecast = Array(N).fill(last);
+          break;
+        }
+        case 'ma': {
+          for (let i = 0; i < N; i++) {
+            const last3 = original.slice(-3);
+            const avg = last3.reduce((a, b) => a + b, 0) / last3.length;
+            forecast.push(avg);
+            original.push(avg);
+          }
+          break;
+        }
+        case 'lr': {
+          const n = original.length;
+          const x = Array.from({ length: n }, (_, i) => i + 1);
+          const xSum = x.reduce((a, b) => a + b);
+          const ySum = original.reduce((a, b) => a + b);
+          const xySum = x.reduce((sum, xi, i) => sum + xi * original[i], 0);
+          const xxSum = x.reduce((sum, xi) => sum + xi * xi, 0);
+          const slope = (n * xySum - xSum * ySum) / (n * xxSum - xSum ** 2);
+          const intercept = (ySum - slope * xSum) / n;
+          forecast = Array.from({ length: N }, (_, i) => slope * (n + i + 1) + intercept);
+          break;
+        }
+        case 'holt': {
+          let alpha = 0.3, beta = 0.1, gamma = 0.1;
+          let seasonLength = 12;
+          let s = [...original];
+          let level = s[0], trend = s[1] - s[0];
+          let seasonals = Array(seasonLength).fill(0);
+          for (let i = 0; i < seasonLength; i++) {
+            seasonals[i] = s[i] - level;
+          }
+          for (let i = 0; i < s.length; i++) {
+            const season = seasonals[i % seasonLength];
+            const value = s[i];
+            const lastLevel = level;
+            level = alpha * (value - season) + (1 - alpha) * (level + trend);
+            trend = beta * (level - lastLevel) + (1 - beta) * trend;
+            seasonals[i % seasonLength] = gamma * (value - level) + (1 - gamma) * season;
+          }
+          for (let i = 0; i < N; i++) {
+            const m = i + 1;
+            const season = seasonals[(original.length + i) % seasonLength];
+            forecast.push(level + m * trend + season);
+          }
+          break;
+        }
+      }
+
+      for (let i = 0; i < N; i++) {
+        const colName = `F${i + 1}`;
+        if (!headers.includes(colName)) headers.push(colName);
+        rawData.forEach((row, r) => {
+          if (!row[headers.indexOf(colName)]) row[headers.indexOf(colName)] = '';
+        });
+        rawData[index][headers.indexOf(colName)] = Math.round(forecast[i]);
+      }
+
+      drawTable();
+      drawChart();
+      chart.data.labels = headers.slice(1);
+      chart.data.datasets[1] && chart.data.datasets.pop();
+      chart.data.datasets.push({
+        label: 'Forecast',
+        data: [...Array(original.length - N).fill(null), ...forecast],
+        borderDash: [5, 5],
+        borderColor: 'red',
+        fill: false,
+        borderWidth: 2
+      });
+      chart.update();
+    }
+
+    function downloadCSV() {
+      const rows = [headers.join(',')];
+      rawData.forEach(row => rows.push(row.map(cell => cell ?? '').join(',')));
+      const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'forecasted_data.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
